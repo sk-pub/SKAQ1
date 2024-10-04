@@ -15,7 +15,7 @@ genBasic = {
     b'\x00\x04': { 'type': b'\x42', 'value': b'SK' }, # manufacturerName # emulate https://www.zigbee2mqtt.io/devices/TPZRCO2HT-Z3.html
     b'\x00\x05': { 'type': b'\x42', 'value': b'AQ1' }, # modelId
     b'\x00\x06': { 'type': b'\x42', 'value': b'20220102' }, # dateCode
-    b'\x00\x07': { 'type': b'\x30', 'value': b'\x03' }, # powerSource 0x04 - DC, 0x03 - Battery
+    b'\x00\x07': { 'type': b'\x30', 'value': b'\x04' }, # powerSource 0x04 - DC, 0x03 - Battery
     b'\x40\x00': { 'type': b'\x42', 'value': b'0.0.0.1' } # swBuildId
 }
 
