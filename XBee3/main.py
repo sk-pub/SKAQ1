@@ -9,6 +9,8 @@ from xbee import XBee
 # 2 seconds is the minimum supported interval.
 measurement_interval = 10
 
+temp_offset = 0.9
+
 blue_led = Pin(Pin.board.D4, Pin.OUT)
 blue_led(0)
 
@@ -46,8 +48,6 @@ def publish_measurement(measurement):
     global p_co2
     global p_temp
     global p_rh
-
-    temp_offset = 1.7
 
     try:
         p_co2 = report_if_changed('co2', co2, p_co2)
@@ -104,6 +104,7 @@ if not retries:
     exit(1)
 
 
+scd30.set_temperature_offset(temp_offset)
 display.contrast(0x00) # 0xff is the maximum
 
 scd30.set_measurement_interval(measurement_interval)
