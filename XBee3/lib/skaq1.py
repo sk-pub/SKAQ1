@@ -9,14 +9,14 @@ ep = b'\x01'
 
 genBasic = {
     b'\x00\x00': { 'type': b'\x20', 'value': b'\x01' }, # zclVersion
-    b'\x00\x01': { 'type': b'\x20', 'value': b'\x00' }, # appVersion
+    b'\x00\x01': { 'type': b'\x20', 'value': b'\x01' }, # appVersion
     b'\x00\x02': { 'type': b'\x20', 'value': b'\x00' }, # stackVersion
-    b'\x00\x03': { 'type': b'\x20', 'value': b'\x00' }, # hwVersion
+    b'\x00\x03': { 'type': b'\x20', 'value': b'\x01' }, # hwVersion
     b'\x00\x04': { 'type': b'\x42', 'value': b'SK' }, # manufacturerName # emulate https://www.zigbee2mqtt.io/devices/TPZRCO2HT-Z3.html
-    b'\x00\x05': { 'type': b'\x42', 'value': b'AQ1' }, # modelId
-    b'\x00\x06': { 'type': b'\x42', 'value': b'20220102' }, # dateCode
+    b'\x00\x05': { 'type': b'\x42', 'value': b'SKAQ1' }, # modelId
+    b'\x00\x06': { 'type': b'\x42', 'value': b'20250302' }, # dateCode
     b'\x00\x07': { 'type': b'\x30', 'value': b'\x04' }, # powerSource 0x04 - DC, 0x03 - Battery
-    b'\x40\x00': { 'type': b'\x42', 'value': b'0.0.0.1' } # swBuildId
+    b'\x40\x00': { 'type': b'\x42', 'value': b'0.0.0.2' } # swBuildId
 }
 
 # Types 0x20 - uint8, 0x29 - int16, 0x21 - uint16, 0x39 - single (4 bytes, based on the IEEE 754 standard for binary floating-point arithmetic)
@@ -28,7 +28,13 @@ zha = {
     'humidity': { 'cluster': 0x0405, 'id': b'\x00\x00', 'type': b'\x21' },
     'co2': { 'cluster': 0x040D, 'id': b'\x00\x00', 'type': b'\x39' },
     'battery-voltage': { 'cluster': 0x0001, 'id': b'\x00\x20', 'type': b'\x20' },
-    'battery-percentage': { 'cluster': 0x0001, 'id': b'\x00\x21', 'type': b'\x20' }
+    'battery-percentage': { 'cluster': 0x0001, 'id': b'\x00\x21', 'type': b'\x20' },
+    'pm1': { 'cluster': 0xfc01, 'id': b'\x00\x00', 'type': b'\x39' },
+    'pm25': { 'cluster': 0x042A, 'id': b'\x00\x00', 'type': b'\x39' },
+    'pm40': { 'cluster': 0xfc01, 'id': b'\x00\x01', 'type': b'\x39' },
+    'pm10': { 'cluster': 0xfc01, 'id': b'\x00\x02', 'type': b'\x39' },
+    'voc': { 'cluster': 0xfc01, 'id': b'\x00\x03', 'type': b'\x39' },
+    'nox': { 'cluster': 0xfc01, 'id': b'\x00\x04', 'type': b'\x39' }
 }
 
 def ieee_addr():
@@ -51,7 +57,7 @@ def simple_desc_rsp(tx):
     device_id = b'\x02\x03'
     version = b'\x01'
 
-    input_clusters_list = [ 0, 3, 65535, 0x0402, 0x0405, 0x040D] # Basic, Indentify, ??, Temperature Measurement, Relative  Humidity Measurement, CO2
+    input_clusters_list = [ 0, 3, 65535, 0x0402, 0x0405, 0x040D, 0xfc01, 0x042A] # Basic, Indentify, ??, Temperature Measurement, Relative  Humidity Measurement, CO2
     input_clusters = b''.join(map(lambda n: struct.pack('<H', n), input_clusters_list))
     input_cluster_count = len(input_clusters_list)
 
@@ -103,7 +109,7 @@ def read_attr_rsp(req):
     # [::-1] to reverse byte order
     msg = b'\x18' + seq_num + cmd_id + attr_id[::-1] + status + attr_type + get_attr_val(attr_id, attr_type, attr_value)
     #print(msg)
-    xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep = 01, dest_ep = 01, cluster = 0000)
+    xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep = 1, dest_ep = 1, cluster = 0000)
 
 
 attr_report_seq_num = 0x00
@@ -123,7 +129,7 @@ def attr_report(attr_name, attr_value):
     msg += attr_id[::-1] + attr_type + get_attr_val(attr_id, attr_type, attr_value)
 
     #print(msg)
-    xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep = 01, dest_ep = 01, cluster = cluster)
+    xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep = 1, dest_ep = 1, cluster = cluster)
     attr_report_seq_num += 1
     if attr_report_seq_num > 0xff:
         attr_report_seq_num = 0x00
@@ -146,5 +152,11 @@ def rx_callback(req):
     elif cluster == 0x0000 and payload[2] == 0x00: # 0x00 - read attributes
         #print('received 0x0000 - respond with read_attr_rsp')
         read_attr_rsp(payload)  
+    # elif cluster == 0x0402 and payload[2] == 0x06: # 0x06 - Configure reporting // b'\x10\x01\x06\x00\x00\x00\x29\x0A\x00\x10\x0ed\x00'
+    #     print('received 0x0402 - Configure reporting. Ignore')
+    else:
+        print('received unknown command')
+        print(cluster)
+        print(" ".join(hex(ord(chr(n))) for n in payload))
   
 xbee.receive_callback(rx_callback)

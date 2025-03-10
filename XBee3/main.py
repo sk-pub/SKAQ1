@@ -1,8 +1,10 @@
 from ssd1306 import SSD1306_I2C
 from scd30 import SCD30
+from sen5x import SEN5x
 from skaq1 import attr_report
 from machine import I2C, Pin
 from sys import exit
+from gc import collect
 
 from xbee import XBee
 
@@ -17,6 +19,9 @@ blue_led(0)
 i2c = I2C(1, freq = 100000)
 display = SSD1306_I2C(128, 32, i2c)
 scd30 = SCD30(i2c, 0x61)
+sen = SEN5x(i2c)
+
+sen.start()
 
 repl_button = Pin(Pin.board.D5, Pin.IN, Pin.PULL_UP)
 
@@ -42,7 +47,7 @@ p_co2 = 0
 p_temp = 0
 p_rh = 0
 
-def publish_measurement(measurement):
+def publish_scd30_measurement(measurement):
     co2, temp, rh = measurement
     
     global p_co2
@@ -66,19 +71,43 @@ def publish_measurement(measurement):
     display.text(line3, 0, 16, 1)
     display.show()
 
+def publish_sen_measurement(measurement):
+    ppm1_0, ppm2_5, ppm4_0, ppm10_0, rh, t, voc, nox = measurement
+    print('PPM 1.0:', ppm1_0, 'PPM 2.5:', ppm2_5, 'PPM 4.0:', ppm4_0, 'PPM 10.0:', ppm10_0)
+    print('Humidity:', rh, 'Temp:', t, 'VOC:', voc, 'NOx:', nox)
+    
+    try:
+        p_ppm1_0 = attr_report('pm1', ppm1_0 * 1000000)
+        p_ppm2_5 = attr_report('pm25', ppm2_5 * 1000000)
+        p_ppm2_5 = attr_report('pm40', ppm4_0 * 1000000)
+        p_ppm10_0 = attr_report('pm10', ppm10_0 * 1000000)
+        p_voc = attr_report('voc', voc * 1000000)
+        p_nox = attr_report('nox', nox * 1000000)
+    except Exception as e:
+        print(e)
+        pass
+    
+    line4 = "VOC: {:.1f} 'NOx {:.1f}".format(voc, nox)
+    
+    display.text(line4, 0, 24, 1)
+    display.show()
+
 def continuous_reading():
     while True:
         # If button 5 is pressed, drop to REPL
         if repl_button.value() == 0:
             raise Exception("Drop to REPL")
 
-        if scd30.get_status_ready():
+        if scd30.get_status_ready() and sen.data_ready:
             measurement = scd30.read_measurement()
             if measurement is not None:
                 co2, temp, rh = measurement
-                publish_measurement(measurement)
+                publish_scd30_measurement(measurement)
+
+            publish_sen_measurement(sen.measured_values)
 
             sleep(measurement_interval)
+            collect() # gc.collect()
         else:
             sleep(1)
 
@@ -119,7 +148,7 @@ try:
 except Exception as e:
     msg = str(e)
 
-    # print('Exception: {}'.format(msg))
+    print('Exception: {}'.format(msg))
     display_msg(msg)
 
     print("Stopping periodic measurement...")
