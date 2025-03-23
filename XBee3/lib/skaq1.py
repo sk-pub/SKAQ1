@@ -34,7 +34,8 @@ zha = {
     'pm40': { 'cluster': 0xfc01, 'id': b'\x00\x01', 'type': b'\x39' },
     'pm10': { 'cluster': 0xfc01, 'id': b'\x00\x02', 'type': b'\x39' },
     'voc': { 'cluster': 0xfc01, 'id': b'\x00\x03', 'type': b'\x39' },
-    'nox': { 'cluster': 0xfc01, 'id': b'\x00\x04', 'type': b'\x39' }
+    'nox': { 'cluster': 0xfc01, 'id': b'\x00\x04', 'type': b'\x39' },
+    't2': { 'cluster': 0xfc01, 'id': b'\x00\x05', 'type': b'\x29' }
 }
 
 def ieee_addr():
