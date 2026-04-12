@@ -26,13 +26,14 @@ const definition = {
 
     deviceAddCustomCluster(CUSTOM_CLUSTER, {
       ID: 0xfc01,
+      name: CUSTOM_CLUSTER,
       attributes: {
-        pm1: { ID: 0x0000, type: Zcl.DataType.SINGLE_PREC },
-        pm4: { ID: 0x0001, type: Zcl.DataType.SINGLE_PREC },
-        pm10: { ID: 0x0002, type: Zcl.DataType.SINGLE_PREC },
-        voc: { ID: 0x0003, type: Zcl.DataType.SINGLE_PREC },
-        nox: { ID: 0x0004, type: Zcl.DataType.SINGLE_PREC },
-        t2: { ID: 0x0005, type: Zcl.DataType.INT16 },
+        pm1: { name: "pm1", ID: 0x0000, type: Zcl.DataType.SINGLE_PREC },
+        pm4: { name: "pm4", ID: 0x0001, type: Zcl.DataType.SINGLE_PREC },
+        pm10: { name: "pm10", ID: 0x0002, type: Zcl.DataType.SINGLE_PREC },
+        voc: { name: "voc", ID: 0x0003, type: Zcl.DataType.SINGLE_PREC },
+        nox: { name: "nox", ID: 0x0004, type: Zcl.DataType.SINGLE_PREC },
+        t2: { name: "t2", ID: 0x0005, type: Zcl.DataType.INT16 },
       },
       commands: {},
       commandsResponse: {},
