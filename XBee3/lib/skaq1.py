@@ -1,6 +1,12 @@
 import xbee
 import struct
 
+def _tx(msg, source_ep, dest_ep, cluster, label, seq):
+    try:
+        xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep=source_ep, dest_ep=dest_ep, cluster=cluster)
+    except Exception as e:
+        print('tx FAIL {} cluster=0x{:04x} seq=0x{:02x} err={}'.format(label, cluster, seq, e))
+
 zdo_device_annce = 0x0013
 zdo_active_ep_rsp = 0x8005
 zdo_simple_desc_rsp = 0x8004
@@ -48,8 +54,7 @@ def active_ep_rsp(tx):
     status = b'\x00'
     ep_count = b'\x01'
     msg = bytes([tx]) + status + nwk_addr() + ep_count + ep
-    #print(msg)
-    xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep = 00, dest_ep = 00, cluster = zdo_active_ep_rsp)
+    _tx(msg, 0, 0, zdo_active_ep_rsp, 'active_ep_rsp', tx)
 
 def simple_desc_rsp(tx):
     status = b'\x00'
@@ -75,8 +80,7 @@ def simple_desc_rsp(tx):
 
     desc_length = len(desc)
     msg = bytes([tx]) + status + nwk_addr() + bytes([desc_length]) + desc
-    #print(msg)
-    xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep = 00, dest_ep = 00, cluster = zdo_simple_desc_rsp)
+    _tx(msg, 0, 0, zdo_simple_desc_rsp, 'simple_desc_rsp', tx)
 
 def get_attr_val(attr_id, data_type, data_value):
     if attr_id == b'\x00\x20': # Battery voltage in units of 100 mV
@@ -88,57 +92,91 @@ def get_attr_val(attr_id, data_type, data_value):
     if data_type == b'\x42':
         return bytes([len(data_value)]) + data_value
 
-    if isinstance(data_value, float) and (data_type == b'\x21' or data_type == b'\x29'):
-        # Multiply by 100 and convert to int
-        return struct.pack('<H', round(data_value * 100))
+    # Caller is expected to pass values already in the ZCL on-wire unit.
+    # This function only handles byte encoding per ZCL data type.
+    if isinstance(data_value, float) and data_type == b'\x21':
+        return struct.pack('<H', int(round(data_value)))
+
+    if isinstance(data_value, float) and data_type == b'\x29':
+        return struct.pack('<h', int(round(data_value)))
 
     if isinstance(data_value, float) and data_type == b'\x39':
-        # Pack into 4 bytes IEEE 754 float
-        return struct.pack('<I', struct.unpack('!I', struct.pack('!f', data_value * 1e-6 ))[0])
+        return struct.pack('<I', struct.unpack('!I', struct.pack('!f', data_value))[0])
 
     return data_value
 
-def read_attr_rsp(req):
+# Cache of last reported measurement values keyed by (cluster, attr_id_BE_bytes) -> (type, value)
+last_values = {}
+
+def read_attr_rsp(cluster, req):
     seq_num = bytes([req[1]])
     cmd_id = b'\x01' # Read Attributes Response
-    status = b'\x00'
-    attr_id = bytes([req[4], req[3]])
-    attr = genBasic.get(attr_id)
-    attr_type = attr.get('type')
-    attr_value = attr.get('value')
-    
-    # [::-1] to reverse byte order
-    msg = b'\x18' + seq_num + cmd_id + attr_id[::-1] + status + attr_type + get_attr_val(attr_id, attr_type, attr_value)
-    #print(msg)
-    xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep = 1, dest_ep = 1, cluster = 0000)
+    msg = b'\x18' + seq_num + cmd_id
+
+    # Request payload after cmd byte is a list of 2-byte LE attribute IDs
+    for i in range(3, len(req) - 1, 2):
+        attr_id_le = bytes([req[i], req[i + 1]])
+        attr_id_be = bytes([req[i + 1], req[i]])
+
+        attr_type = None
+        attr_value = None
+
+        if cluster == 0x0000:
+            attr = genBasic.get(attr_id_be)
+            if attr is not None:
+                attr_type = attr.get('type')
+                attr_value = attr.get('value')
+        else:
+            cached = last_values.get((cluster, attr_id_be))
+            if cached is not None:
+                attr_type, attr_value = cached
+
+        if attr_type is not None:
+            msg += attr_id_le + b'\x00' + attr_type + get_attr_val(attr_id_be, attr_type, attr_value)
+        else:
+            msg += attr_id_le + b'\x86' # UNSUPPORTED_ATTRIBUTE
+
+    _tx(msg, 1, 1, cluster, 'read_attr_rsp', req[1])
+
+def configure_reporting_rsp(cluster, req):
+    # ZCL 2.5.8 - single status byte means success for all attribute records
+    seq_num = bytes([req[1]])
+    cmd_id = b'\x07' # Configure Reporting Response
+    status = b'\x00' # SUCCESS
+    msg = b'\x18' + seq_num + cmd_id + status
+    _tx(msg, 1, 1, cluster, 'configure_reporting_rsp', req[1])
 
 
 attr_report_seq_num = 0x00
 
-def attr_report(attr_name, attr_value):
-    # TODO: check "2.5.7 Configure Reporting Command" to configure periodic or change-based reporting (https://zigbeealliance.org/wp-content/uploads/2019/12/07-5123-06-zigbee-cluster-library-specification.pdf)    
+def attr_report_batch(items):
+    # items: iterable of (attr_name, value). Groups by cluster and sends one
+    # ZCL Report Attributes frame per cluster.
     global attr_report_seq_num
-    cmd_id = b'\x0A' # Report attributes
-    msg = b'\x18' + bytes([attr_report_seq_num]) + cmd_id
-    
-    zha_attr = zha.get(attr_name)
-    cluster = zha_attr.get('cluster')
-    attr_id = zha_attr.get('id')
-    attr_type = zha_attr.get('type')
-    
-    # [::-1] to reverse byte order
-    msg += attr_id[::-1] + attr_type + get_attr_val(attr_id, attr_type, attr_value)
 
-    #print(msg)
-    xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep = 1, dest_ep = 1, cluster = cluster)
-    attr_report_seq_num += 1
-    if attr_report_seq_num > 0xff:
-        attr_report_seq_num = 0x00
+    by_cluster = {}
+    for name, val in items:
+        zha_attr = zha.get(name)
+        cluster = zha_attr.get('cluster')
+        attr_id = zha_attr.get('id')
+        attr_type = zha_attr.get('type')
+        last_values[(cluster, attr_id)] = (attr_type, val)
+        by_cluster.setdefault(cluster, []).append((name, val, attr_id, attr_type))
+
+    for cluster, records in by_cluster.items():
+        seq = attr_report_seq_num
+        msg = b'\x18' + bytes([seq]) + b'\x0A' # frame control + seq + Report Attributes cmd
+        names = []
+        for name, val, attr_id, attr_type in records:
+            msg += attr_id[::-1] + attr_type + get_attr_val(attr_id, attr_type, val)
+            names.append(name)
+        _tx(msg, 1, 1, cluster, 'report[' + ','.join(names) + ']', seq)
+        attr_report_seq_num = (attr_report_seq_num + 1) & 0xff
+
+def attr_report(attr_name, attr_value):
+    attr_report_batch([(attr_name, attr_value)])
 
 def rx_callback(req):
-    #print('rx_callback:')
-    #print(req)
-    
     cluster = req.get('cluster')
     payload = req.get('payload')
 
@@ -150,14 +188,13 @@ def rx_callback(req):
         #print('received 0x0004 - respond with simple_desc_rsp')
         tx = req.get('payload')[0]
         simple_desc_rsp(tx)
-    elif cluster == 0x0000 and payload[2] == 0x00: # 0x00 - read attributes
-        #print('received 0x0000 - respond with read_attr_rsp')
-        read_attr_rsp(payload)  
-    # elif cluster == 0x0402 and payload[2] == 0x06: # 0x06 - Configure reporting // b'\x10\x01\x06\x00\x00\x00\x29\x0A\x00\x10\x0ed\x00'
-    #     print('received 0x0402 - Configure reporting. Ignore')
+    elif req.get('dest_ep') == 1 and (payload[0] & 0x03) == 0x00 and payload[2] == 0x00: # ZCL general Read Attributes on any cluster
+        read_attr_rsp(cluster, payload)
+    elif req.get('dest_ep') == 1 and (payload[0] & 0x03) == 0x00 and payload[2] == 0x06: # ZCL general Configure Reporting on any cluster
+        configure_reporting_rsp(cluster, payload)
+    elif cluster == 0x8001 or cluster == 0x8002: # ZDO IEEE_addr_rsp / Node_Desc_rsp - no response needed
+        pass
     else:
-        print('received unknown command')
-        print(cluster)
-        print(" ".join(hex(ord(chr(n))) for n in payload))
+        print('rx unknown cluster=0x{:04x} payload={}'.format(cluster, bytes(payload)))
   
 xbee.receive_callback(rx_callback)

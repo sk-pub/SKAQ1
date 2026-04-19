@@ -1,9 +1,10 @@
 from scd30 import SCD30
 from sen5x import SEN5x
-from skaq1 import attr_report
+from skaq1 import attr_report_batch
 from machine import I2C, Pin
 from sys import exit
 from gc import collect
+from time import sleep
 
 from xbee import XBee
 
@@ -26,17 +27,32 @@ repl_button = Pin(Pin.board.D5, Pin.IN, Pin.PULL_UP)
 
 xbee = XBee()
 
-def sleep(t):
-    xbee.sleep_now(t * 1000, False)
+def scaled(val, factor):
+    return val * factor if val is not None else None
 
-
-def report_if_changed(attr_name, val, p_val):
-    if p_val != 0 and abs(val - p_val) / p_val < 0.002:
-        # Change is less than tolerance
-        return p_val
-
-    attr_report(attr_name, val)
-    return val
+def report_if_changed(records):
+    # records: iterable of (attr_name, val, prev_val)
+    # val is expected in the Zigbee on-wire unit for the attribute.
+    # Returns list of new prev values in the same order.
+    # Skips None values and values within 0.2% of the previous report.
+    # Sends one ZCL Report Attributes frame per cluster for the changed ones.
+    new_prev = []
+    to_send = []
+    for name, val, prev in records:
+        if val is None:
+            new_prev.append(prev)
+            continue
+        if val == prev:
+            new_prev.append(prev)
+            continue
+        if prev != 0 and abs(val - prev) / prev < 0.002:
+            new_prev.append(prev)
+            continue
+        to_send.append((name, val))
+        new_prev.append(val)
+    if to_send:
+        attr_report_batch(to_send)
+    return new_prev
 
 p_co2 = 0
 p_temp = 0
@@ -53,49 +69,32 @@ p_temp_sen = 0
 def publish_scd30_measurement(measurement):
     co2, temp, rh = measurement
 
-    global p_co2
-    global p_temp
-    global p_rh
-
-    try:
-        p_co2 = report_if_changed('co2', co2, p_co2)
-        p_temp = report_if_changed('temperature', temp, p_temp)
-        p_rh = report_if_changed('humidity', rh, p_rh)
-    except:
-        pass
-
-    line1 = 'CO2: {:.2f} ppm'.format(co2)
-    line2 = "T: {:.1f} 'C -{:.1f}".format(temp, scd30.get_temperature_offset())
-    line3 = 'RH: {:.2f} %'.format(rh)
-
-    print('SCD Temp:', temp)
+    global p_co2, p_temp, p_rh
+    p_co2, p_temp, p_rh = report_if_changed([
+        ('co2', scaled(co2, 1e-6), p_co2),            # ZCL mol fraction
+        ('temperature', scaled(temp, 100), p_temp),   # ZCL int16, 0.01 C
+        ('humidity', scaled(rh, 100), p_rh),          # ZCL uint16, 0.01 %
+    ])
 
 def publish_sen_measurement(measurement):
     ppm1_0, ppm2_5, ppm4_0, ppm10_0, rh, temp_sen, voc, nox = measurement
-    print('PPM 1.0:', ppm1_0, 'PPM 2.5:', ppm2_5, 'PPM 4.0:', ppm4_0, 'PPM 10.0:', ppm10_0)
-    print('Humidity:', rh, 'Temp:', temp_sen, 'VOC:', voc, 'NOx:', nox)
 
-    global p_ppm1_0
-    global p_ppm2_5
-    global p_ppm4_0
-    global p_ppm10_0
-    global p_voc
-    global p_nox
-    global p_temp_sen
+    global p_ppm1_0, p_ppm2_5, p_ppm4_0, p_ppm10_0, p_voc, p_nox, p_temp_sen
+    p_ppm1_0, p_ppm2_5, p_ppm4_0, p_ppm10_0, p_voc, p_nox, p_temp_sen = report_if_changed([
+        ('pm1', ppm1_0, p_ppm1_0),                      # ZCL float, ug/m3
+        ('pm25', ppm2_5, p_ppm2_5),                     # ZCL float, ug/m3
+        ('pm40', ppm4_0, p_ppm4_0),                     # ZCL float, ug/m3
+        ('pm10', ppm10_0, p_ppm10_0),                   # ZCL float, ug/m3
+        ('voc', voc, p_voc),                            # raw index
+        ('nox', nox, p_nox),                            # raw index
+        ('t2', scaled(temp_sen, 100), p_temp_sen),      # ZCL int16, 0.01 C
+    ])
 
-    try:
-        p_ppm1_0 = report_if_changed('pm1', ppm1_0 * 1000000, p_ppm1_0)
-        p_ppm2_5 = report_if_changed('pm25', ppm2_5 * 1000000, p_ppm2_5)
-        p_ppm4_0 = report_if_changed('pm40', ppm4_0 * 1000000, p_ppm4_0)
-        p_ppm10_0 = report_if_changed('pm10', ppm10_0 * 1000000, p_ppm10_0)
-        p_voc = report_if_changed('voc', voc * 1000000, p_voc)
-        p_nox = report_if_changed('nox', nox * 1000000, p_nox)
-        p_temp_sen = report_if_changed('t2', temp_sen, p_temp_sen)
-    except Exception as e:
-        print(e)
-        pass
-
-    line4 = "VOC: {:.1f} 'NOx {:.1f}".format(voc, nox)
+def log_cycle(scd, sen_m):
+    co2, scd_t, scd_rh = scd if scd is not None else (0, 0, 0)
+    pm1, pm25, pm4, pm10, sen_rh, sen_t, voc, nox = sen_m
+    print('CO2={:.0f} T={:.2f} RH={:.1f} | PM 1/2.5/4/10={}/{}/{}/{} VOC={} NOx={} SEN T={} RH={}'.format(
+        co2, scd_t, scd_rh, pm1, pm25, pm4, pm10, voc, nox, sen_t, sen_rh))
 
 def continuous_reading():
     while True:
@@ -105,16 +104,14 @@ def continuous_reading():
 
         if scd30.get_status_ready() and sen.data_ready:
             measurement = scd30.read_measurement()
+            sen_m = sen.measured_values
             if measurement is not None:
-                co2, temp, rh = measurement
                 publish_scd30_measurement(measurement)
-
-            publish_sen_measurement(sen.measured_values)
-
-            sleep(measurement_interval)
+            publish_sen_measurement(sen_m)
+            log_cycle(measurement, sen_m)
             collect() # gc.collect()
-        else:
-            sleep(1)
+
+        sleep(1)
 
 ##########################
 
@@ -141,7 +138,18 @@ scd30.set_measurement_interval(measurement_interval)
 scd30.set_automatic_recalibration(enable=True)
 scd30.start_continous_measurement()
 
-sleep(measurement_interval)
+# Prime the measurement cache so Read Attributes responses work during interview
+print("Priming measurement cache...")
+for _ in range(30):
+    if scd30.get_status_ready() and sen.data_ready:
+        measurement = scd30.read_measurement()
+        sen_m = sen.measured_values
+        if measurement is not None:
+            publish_scd30_measurement(measurement)
+        publish_sen_measurement(sen_m)
+        log_cycle(measurement, sen_m)
+        break
+    sleep(1)
 
 try:
     continuous_reading()
