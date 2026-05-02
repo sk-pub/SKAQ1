@@ -34,6 +34,7 @@ const definition = {
         voc: { name: "voc", ID: 0x0003, type: Zcl.DataType.SINGLE_PREC },
         nox: { name: "nox", ID: 0x0004, type: Zcl.DataType.SINGLE_PREC },
         t2: { name: "t2", ID: 0x0005, type: Zcl.DataType.INT16 },
+        ref_temp: { name: "ref_temp", ID: 0x0006, type: Zcl.DataType.INT16, write: true, report: true },
       },
       commands: {},
       commandsResponse: {},
@@ -117,6 +118,22 @@ const definition = {
       reporting: { min: "1_SECOND", max: "1_HOUR", change: 100 },
       scale: 100,
       description: "Temperature from the Sensirion SEN55 sensor",
+    }),
+    numeric({
+      name: "reference_temperature",
+      cluster: CUSTOM_CLUSTER,
+      attribute: "ref_temp",
+      unit: "°C",
+      access: "STATE_SET",
+      reporting: { min: "1_SECOND", max: "1_HOUR", change: 10 },
+      scale: 100,
+      valueMin: -10,
+      valueMax: 50,
+      valueStep: 0.1,
+      description:
+        "Live average of both temperature sensors. Edit to recalibrate: write " +
+        "the actual room temperature and the device adjusts both sensors so " +
+        "their readings match. Wait for the enclosure air to equilibrate before editing.",
     }),
   ],
   meta: {},

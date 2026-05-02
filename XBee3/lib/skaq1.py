@@ -41,7 +41,8 @@ zha = {
     'pm10': { 'cluster': 0xfc01, 'id': b'\x00\x02', 'type': b'\x39' },
     'voc': { 'cluster': 0xfc01, 'id': b'\x00\x03', 'type': b'\x39' },
     'nox': { 'cluster': 0xfc01, 'id': b'\x00\x04', 'type': b'\x39' },
-    't2': { 'cluster': 0xfc01, 'id': b'\x00\x05', 'type': b'\x29' }
+    't2': { 'cluster': 0xfc01, 'id': b'\x00\x05', 'type': b'\x29' },
+    'ref_temp': { 'cluster': 0xfc01, 'id': b'\x00\x06', 'type': b'\x29' }
 }
 
 def ieee_addr():
@@ -138,6 +139,51 @@ def read_attr_rsp(cluster, req):
 
     _tx(msg, 1, 1, cluster, 'read_attr_rsp', req[1])
 
+_write_attr_cb = None
+
+def register_write_attr_callback(cb):
+    global _write_attr_cb
+    _write_attr_cb = cb
+
+def write_attrs_rsp(cluster, req):
+    seq_num = bytes([req[1]])
+    cmd_id = b'\x04' # Write Attributes Response
+
+    statuses = []
+    i = 3
+    while i + 3 <= len(req):
+        attr_id_le = bytes([req[i], req[i + 1]])
+        attr_id_be = bytes([req[i + 1], req[i]])
+        data_type = req[i + 2]
+        i += 3
+
+        if data_type != 0x29: # only int16 supported for now
+            statuses.append((attr_id_le, 0x8d)) # INVALID_DATA_TYPE
+            break
+        if i + 2 > len(req):
+            statuses.append((attr_id_le, 0x80)) # MALFORMED_COMMAND
+            break
+        raw = bytes(req[i:i + 2])
+        i += 2
+
+        status = 0x86 # UNSUPPORTED_ATTRIBUTE
+        if _write_attr_cb is not None:
+            try:
+                if _write_attr_cb(cluster, attr_id_be, data_type, raw):
+                    status = 0x00
+            except Exception as e:
+                print('write cb err: {}'.format(e))
+                status = 0x01 # FAILURE
+        statuses.append((attr_id_le, status))
+
+    msg = b'\x18' + seq_num + cmd_id
+    if statuses and all(s == 0x00 for _, s in statuses):
+        msg += b'\x00'
+    else:
+        for attr_id_le, s in statuses:
+            msg += bytes([s]) + attr_id_le
+    _tx(msg, 1, 1, cluster, 'write_attrs_rsp', req[1])
+
 def configure_reporting_rsp(cluster, req):
     # ZCL 2.5.8 - single status byte means success for all attribute records
     seq_num = bytes([req[1]])
@@ -190,6 +236,8 @@ def rx_callback(req):
         simple_desc_rsp(tx)
     elif req.get('dest_ep') == 1 and (payload[0] & 0x03) == 0x00 and payload[2] == 0x00: # ZCL general Read Attributes on any cluster
         read_attr_rsp(cluster, payload)
+    elif req.get('dest_ep') == 1 and (payload[0] & 0x03) == 0x00 and payload[2] == 0x02: # ZCL general Write Attributes on any cluster
+        write_attrs_rsp(cluster, payload)
     elif req.get('dest_ep') == 1 and (payload[0] & 0x03) == 0x00 and payload[2] == 0x06: # ZCL general Configure Reporting on any cluster
         configure_reporting_rsp(cluster, payload)
     elif cluster == 0x8001 or cluster == 0x8002: # ZDO IEEE_addr_rsp / Node_Desc_rsp - no response needed

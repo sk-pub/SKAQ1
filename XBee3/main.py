@@ -1,18 +1,44 @@
 from scd30 import SCD30
 from sen5x import SEN5x
-from skaq1 import attr_report_batch
+from skaq1 import attr_report_batch, register_write_attr_callback
 from machine import I2C, Pin
 from sys import exit
 from gc import collect
 from time import sleep
+import json
+import os
+import struct
 
 from xbee import XBee
 
 # 2 seconds is the minimum supported interval.
 measurement_interval = 10
 
-scd_temp_offset = -5.7
-sen_temp_offset = -3.2
+CONFIG_PATH = '/flash/config.json'
+
+def load_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+def save_config(cfg):
+    # XBee3 MicroPython's 'w' mode raises EEXIST instead of truncating.
+    try:
+        os.remove(CONFIG_PATH)
+    except OSError:
+        pass
+    try:
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(cfg, f)
+    except OSError as e:
+        print('config save fail: {}'.format(e))
+
+_config = load_config()
+scd_temp_offset = _config.get('scd_temp_offset', -5.7)
+sen_temp_offset = _config.get('sen_temp_offset', -3.2)
+print('temp offsets: scd={:.2f} sen={:.2f}'.format(scd_temp_offset, sen_temp_offset))
 
 blue_led = Pin(Pin.board.D4, Pin.OUT)
 blue_led(0)
@@ -65,6 +91,7 @@ p_ppm10_0 = 0
 p_voc = 0
 p_nox = 0
 p_temp_sen = 0
+p_ref_temp = 0
 
 def publish_scd30_measurement(measurement):
     co2, temp, rh = measurement
@@ -90,6 +117,39 @@ def publish_sen_measurement(measurement):
         ('t2', scaled(temp_sen, 100), p_temp_sen),      # ZCL int16, 0.01 C
     ])
 
+def publish_ref_temp():
+    global p_ref_temp
+    if p_temp == 0 or p_temp_sen == 0:
+        return
+    avg = (p_temp + p_temp_sen) // 2
+    [p_ref_temp] = report_if_changed([('ref_temp', avg, p_ref_temp)])
+
+def on_write_attr(cluster, attr_id_be, data_type, raw):
+    global scd_temp_offset, sen_temp_offset
+    if cluster == 0xfc01 and attr_id_be == b'\x00\x06' and data_type == 0x29:
+        ref = struct.unpack('<h', raw)[0] / 100.0
+        print('rx ref_temp={:.2f} (scd={:.2f} sen={:.2f})'.format(ref, p_temp / 100.0, p_temp_sen / 100.0))
+        if p_temp == 0 or p_temp_sen == 0:
+            print('calibration: no readings yet, refusing')
+            return False
+        new_scd = scd_temp_offset + (ref - p_temp / 100.0)
+        new_sen = sen_temp_offset + (ref - p_temp_sen / 100.0)
+        # SCD30 register is unsigned: it can only subtract from the raw reading,
+        # so our (negative) variable must stay <= 0.
+        if new_scd > 0:
+            print('calibration: scd offset would go positive ({:.2f}), refusing'.format(new_scd))
+            return False
+        scd30.set_temperature_offset(-new_scd)
+        sen.temperature_compensation_params = (new_sen, 0.0, 0)
+        scd_temp_offset = new_scd
+        sen_temp_offset = new_sen
+        save_config({'scd_temp_offset': scd_temp_offset, 'sen_temp_offset': sen_temp_offset})
+        print('calibrated ref={:.2f} scd_off={:.2f} sen_off={:.2f}'.format(ref, scd_temp_offset, sen_temp_offset))
+        return True
+    return False
+
+register_write_attr_callback(on_write_attr)
+
 def log_cycle(scd, sen_m):
     co2, scd_t, scd_rh = scd if scd is not None else (0, 0, 0)
     pm1, pm25, pm4, pm10, sen_rh, sen_t, voc, nox = sen_m
@@ -108,6 +168,7 @@ def continuous_reading():
             if measurement is not None:
                 publish_scd30_measurement(measurement)
             publish_sen_measurement(sen_m)
+            publish_ref_temp()
             log_cycle(measurement, sen_m)
             collect() # gc.collect()
 
@@ -147,6 +208,7 @@ for _ in range(30):
         if measurement is not None:
             publish_scd30_measurement(measurement)
         publish_sen_measurement(sen_m)
+        publish_ref_temp()
         log_cycle(measurement, sen_m)
         break
     sleep(1)
