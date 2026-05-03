@@ -4,7 +4,7 @@ from skaq1 import attr_report_batch, register_write_attr_callback
 from machine import I2C, Pin
 from sys import exit
 from gc import collect
-from time import sleep
+from time import sleep, ticks_ms, ticks_diff
 import json
 import os
 import struct
@@ -36,8 +36,8 @@ def save_config(cfg):
         print('config save fail: {}'.format(e))
 
 _config = load_config()
-scd_temp_offset = _config.get('scd_temp_offset', -5.7)
-sen_temp_offset = _config.get('sen_temp_offset', -3.2)
+scd_temp_offset = _config.get('scd_temp_offset', -6.4)
+sen_temp_offset = _config.get('sen_temp_offset', -4.0)
 print('temp offsets: scd={:.2f} sen={:.2f}'.format(scd_temp_offset, sen_temp_offset))
 
 blue_led = Pin(Pin.board.D4, Pin.OUT)
@@ -124,29 +124,49 @@ def publish_ref_temp():
     avg = (p_temp + p_temp_sen) // 2
     [p_ref_temp] = report_if_changed([('ref_temp', avg, p_ref_temp)])
 
+# z2m sends intermediate values as the user edits the number field; debounce so
+# only the last value within a quiet window is actually applied.
+CAL_DEBOUNCE_MS = 5000
+_pending_ref = None
+_pending_at = 0
+
 def on_write_attr(cluster, attr_id_be, data_type, raw):
-    global scd_temp_offset, sen_temp_offset
+    global _pending_ref, _pending_at
     if cluster == 0xfc01 and attr_id_be == b'\x00\x06' and data_type == 0x29:
         ref = struct.unpack('<h', raw)[0] / 100.0
-        print('rx ref_temp={:.2f} (scd={:.2f} sen={:.2f})'.format(ref, p_temp / 100.0, p_temp_sen / 100.0))
-        if p_temp == 0 or p_temp_sen == 0:
-            print('calibration: no readings yet, refusing')
-            return False
-        new_scd = scd_temp_offset + (ref - p_temp / 100.0)
-        new_sen = sen_temp_offset + (ref - p_temp_sen / 100.0)
-        # SCD30 register is unsigned: it can only subtract from the raw reading,
-        # so our (negative) variable must stay <= 0.
-        if new_scd > 0:
-            print('calibration: scd offset would go positive ({:.2f}), refusing'.format(new_scd))
-            return False
-        scd30.set_temperature_offset(-new_scd)
-        sen.temperature_compensation_params = (new_sen, 0.0, 0)
-        scd_temp_offset = new_scd
-        sen_temp_offset = new_sen
-        save_config({'scd_temp_offset': scd_temp_offset, 'sen_temp_offset': sen_temp_offset})
-        print('calibrated ref={:.2f} scd_off={:.2f} sen_off={:.2f}'.format(ref, scd_temp_offset, sen_temp_offset))
+        print('rx ref_temp={:.2f} (debouncing)'.format(ref))
+        _pending_ref = ref
+        _pending_at = ticks_ms()
         return True
     return False
+
+def apply_pending_calibration():
+    global _pending_ref, scd_temp_offset, sen_temp_offset
+    if _pending_ref is None:
+        return
+    if ticks_diff(ticks_ms(), _pending_at) < CAL_DEBOUNCE_MS:
+        return
+    ref = _pending_ref
+    _pending_ref = None
+    if p_temp == 0 or p_temp_sen == 0:
+        print('calibration: no readings yet, refusing ref={:.2f}'.format(ref))
+        return
+    new_scd = scd_temp_offset + (ref - p_temp / 100.0)
+    new_sen = sen_temp_offset + (ref - p_temp_sen / 100.0)
+    # Both sensors self-heat, so corrected reading <= raw, i.e. offset <= 0.
+    # SCD30 also can't store a negative register value.
+    if new_scd > 0 or new_sen > 0:
+        print('calibration: offset would go positive (scd={:.2f} sen={:.2f}), refusing'.format(new_scd, new_sen))
+        return
+    if abs(new_scd) > 15 or abs(new_sen) > 15:
+        print('calibration: offset out of bounds (scd={:.2f} sen={:.2f}), refusing'.format(new_scd, new_sen))
+        return
+    scd30.set_temperature_offset(-new_scd)
+    sen.temperature_compensation_params = (new_sen, 0.0, 0)
+    scd_temp_offset = new_scd
+    sen_temp_offset = new_sen
+    save_config({'scd_temp_offset': scd_temp_offset, 'sen_temp_offset': sen_temp_offset})
+    print('calibrated ref={:.2f} scd_off={:.2f} sen_off={:.2f}'.format(ref, scd_temp_offset, sen_temp_offset))
 
 register_write_attr_callback(on_write_attr)
 
@@ -172,6 +192,7 @@ def continuous_reading():
             log_cycle(measurement, sen_m)
             collect() # gc.collect()
 
+        apply_pending_calibration()
         sleep(1)
 
 ##########################
