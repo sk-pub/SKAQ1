@@ -10,10 +10,32 @@ Files needed on the device:
 
 ```
 /flash/main.mpy
+/flash/lib/eventlog.mpy
 /flash/lib/scd30.mpy
 /flash/lib/sen5x.mpy
 /flash/lib/skaq1.mpy
 ```
+
+## Event log
+
+Problems (boots, fatal exceptions with traceback, TX failure streaks, network
+association changes) are recorded by `eventlog.py` in `/flash/log.txt`, which
+survives reboots. Read it over the MicroPython REPL:
+
+```python
+import eventlog
+eventlog.dump()
+```
+
+Timestamps are `up=<seconds since boot>` (no RTC). Space is bounded three ways:
+the file is capped at 4 KB (oldest lines dropped), writes are capped at 20 per
+boot, and writing stops if flash free space falls below 16 KB. That keeps the
+log around 1% of the ~382 KB file system (firmware 1014, per `ATFS INFO`).
+
+Note the XBee3 file system only reclaims deleted-file space at its end, so
+remove+rewrite cycles interleaved with other file writes slowly strand dead
+space. If `ATFS INFO` ever shows the space missing, `os.format()` and
+re-uploading the files above recovers it.
 
 ## XBee3 module configuration (XCTU)
 
@@ -40,7 +62,36 @@ Defaults that should remain:
 
 - `CE` = 0 → router (mains-powered, always-on)
 - `SM` = 0 → no sleep
-- `ID` = 0 → join any reachable PAN
+- `ID` = 0 → join any reachable PAN (pinned automatically after first join, see below)
+
+Set automatically by the firmware after every successful join
+(`configure_network_selfheal` in `skaq1.py`, no XCTU steps needed):
+
+| AT | Value | Meaning |
+| --- | --- | --- |
+| `ID` | network ext PAN | Pinned to the joined network's extended PAN ID (`OP`); never joins a foreign network again |
+| `JV` | 1 | Verify coordinator on boot, rejoin if missing |
+| `NW` | 30 | Network watchdog: self-rejoin after 3×30 min without coordinator contact |
+| `DC` | bit 5 set (OR-ed into existing value) | Watchdog rejoins without leaving the network (avoids stranding) |
+
+### Moving a device to another network
+
+The pinned `ID` means the device only ever looks for its original network.
+That's the right behavior when the coordinator hardware is replaced but the
+network itself survives — i.e. Z2M's coordinator backup is restored onto the
+new dongle (same PAN, keys, channel): devices rejoin on their own, nothing
+to do.
+
+If the network genuinely changes — fresh Z2M install, new network created
+without restoring the backup, changed PAN/security settings — the device
+keeps searching for the old network forever and must be re-pointed once,
+via XCTU or the MicroPython REPL:
+
+1. Clear the pin: set `ID` to 0 (REPL: `xbee.atcmd('ID', b'\x00' * 8)`).
+2. Persist it: write settings (REPL: `xbee.atcmd('WR')`).
+3. Leave the old network and rescan: `NR` (REPL: `xbee.atcmd('NR', 0)`).
+4. Enable permit join in Z2M. After the device joins, the firmware
+   re-pins `ID` to the new network automatically — no further steps.
 
 ## Hardware wiring (current build)
 

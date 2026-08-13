@@ -1,11 +1,80 @@
 import xbee
 import struct
+import eventlog
+
+_tx_fail_streak = 0
 
 def _tx(msg, source_ep, dest_ep, cluster, label, seq):
+    global _tx_fail_streak
     try:
         xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep=source_ep, dest_ep=dest_ep, cluster=cluster)
+        if _tx_fail_streak:
+            eventlog.log('tx ok after {} fails'.format(_tx_fail_streak))
+            _tx_fail_streak = 0
     except Exception as e:
+        if _tx_fail_streak == 0:
+            eventlog.log('tx FAIL {} cluster=0x{:04x} err={}'.format(label, cluster, e))
+        _tx_fail_streak += 1
         print('tx FAIL {} cluster=0x{:04x} seq=0x{:02x} err={}'.format(label, cluster, seq, e))
+
+def association_status():
+    # AI (Association Indication): 0 means joined.
+    try:
+        return xbee.atcmd('AI')
+    except Exception:
+        return None
+
+def configure_network_selfheal():
+    # One-time radio self-configuration, run once joined (see README):
+    # pin ID to the network's extended PAN so the device can never join a
+    # foreign network, and enable watchdog-driven self-rejoin so temporary
+    # coordinator loss heals without a manual permit-join + re-plug.
+    # Idempotent: writes radio flash (WR) only when a value differs.
+    try:
+        if xbee.atcmd('AI') != 0:
+            return
+        wanted = [
+            ('NW', 30),                       # watchdog: 3x30 min without coordinator
+            ('JV', 1),                        # verify coordinator on boot
+            ('DC', xbee.atcmd('DC') | 0x20),  # bit 5: watchdog rejoins without leaving
+        ]
+        op = xbee.atcmd('OP')
+        if op != b'\x00' * 8:
+            wanted.append(('ID', op))
+        dirty = False
+        for cmd, val in wanted:
+            if xbee.atcmd(cmd) != val:
+                xbee.atcmd(cmd, val)
+                dirty = True
+        if dirty:
+            xbee.atcmd('WR')
+            eventlog.log('radio config updated')
+    except Exception as e:
+        print('radio config fail: {}'.format(e))
+
+_last_ai = None
+_seen_ai = []  # XBee3 MicroPython has no set builtin
+
+def check_association():
+    # Log AI transitions so the log shows when the radio dropped off the
+    # network and with what status. During an outage AI can cycle at ~1 Hz,
+    # so each distinct nonzero value is logged once per outage episode to
+    # avoid exhausting the per-boot log-write budget before the recovery.
+    global _last_ai
+    ai = association_status()
+    if ai is None:
+        return
+    if ai != _last_ai:
+        if ai == 0:
+            if _last_ai is not None:
+                eventlog.log('network AI=0x00')
+            del _seen_ai[:]
+            # Covers joins that complete after boot (e.g. first pairing).
+            configure_network_selfheal()
+        elif ai not in _seen_ai:
+            _seen_ai.append(ai)
+            eventlog.log('network AI=0x{:02x}'.format(ai))
+        _last_ai = ai
 
 zdo_device_annce = 0x0013
 zdo_active_ep_rsp = 0x8005

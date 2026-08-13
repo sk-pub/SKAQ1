@@ -1,6 +1,7 @@
 from scd30 import SCD30
 from sen5x import SEN5x
-from skaq1 import attr_report_batch, register_write_attr_callback
+from skaq1 import attr_report_batch, register_write_attr_callback, check_association, association_status, configure_network_selfheal
+import eventlog
 from machine import I2C, Pin
 from sys import exit
 from gc import collect
@@ -34,6 +35,8 @@ def save_config(cfg):
             json.dump(cfg, f)
     except OSError as e:
         print('config save fail: {}'.format(e))
+
+eventlog.log('boot')
 
 _config = load_config()
 scd_temp_offset = _config.get('scd_temp_offset', -6.4)
@@ -71,7 +74,7 @@ def report_if_changed(records):
         if val == prev:
             new_prev.append(prev)
             continue
-        if prev != 0 and abs(val - prev) / prev < 0.002:
+        if prev != 0 and abs(val - prev) / abs(prev) < 0.002:
             new_prev.append(prev)
             continue
         to_send.append((name, val))
@@ -176,11 +179,14 @@ def log_cycle(scd, sen_m):
     print('CO2={:.0f} T={:.2f} RH={:.1f} | PM 1/2.5/4/10={}/{}/{}/{} VOC={} NOx={} SEN T={} RH={}'.format(
         co2, scd_t, scd_rh, pm1, pm25, pm4, pm10, voc, nox, sen_t, sen_rh))
 
+class ReplDrop(Exception):
+    pass
+
 def continuous_reading():
     while True:
         # If button 5 is pressed, drop to REPL
         if repl_button.value() == 0:
-            raise Exception("Drop to REPL")
+            raise ReplDrop
 
         if scd30.get_status_ready() and sen.data_ready:
             measurement = scd30.read_measurement()
@@ -192,6 +198,7 @@ def continuous_reading():
             log_cycle(measurement, sen_m)
             collect() # gc.collect()
 
+        check_association()
         apply_pending_calibration()
         sleep(1)
 
@@ -210,7 +217,7 @@ while ready is None and retries:
     sleep(1)
     retries -= 1
 if not retries:
-    print("SCD30 wait timeout")
+    eventlog.log('SCD30 probe timeout, exiting')
     exit(1)
 
 scd30.set_temperature_offset(-scd_temp_offset)
@@ -219,6 +226,21 @@ sen.temperature_compensation_params = (sen_temp_offset, 0.0, 0)
 scd30.set_measurement_interval(measurement_interval)
 scd30.set_automatic_recalibration(enable=True)
 scd30.start_continous_measurement()
+
+# The radio joins the network in parallel with the sensor warm-up above;
+# don't transmit before the join completes, or the first report batch
+# fails with ENOTCONN and pollutes the log on every boot.
+print("Waiting for network join...")
+retries = 60
+ai = association_status()
+while ai != 0 and retries:
+    sleep(1)
+    retries -= 1
+    ai = association_status()
+if ai != 0:
+    eventlog.log('network join timeout, AI=0x{:02x}'.format(0xff if ai is None else ai))
+else:
+    configure_network_selfheal()
 
 # Prime the measurement cache so Read Attributes responses work during interview
 print("Priming measurement cache...")
@@ -236,8 +258,10 @@ for _ in range(30):
 
 try:
     continuous_reading()
+except ReplDrop:
+    print("Drop to REPL")
 except Exception as e:
-    msg = str(e)
-
-    print('Exception: {}'.format(msg))
+    # After this handler the script ends and the device stops reporting for
+    # good, so make sure the reason survives in the log.
+    eventlog.log_exception('fatal', e)
     print("Stopping periodic measurement...")
