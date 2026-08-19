@@ -7,7 +7,12 @@ _tx_fail_streak = 0
 def _tx(msg, source_ep, dest_ep, cluster, label, seq):
     global _tx_fail_streak
     try:
-        xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep=source_ep, dest_ep=dest_ep, cluster=cluster)
+        # xbee.transmit defaults to Digi's profile 0xC105. The z2m ember
+        # driver only recognizes ZDO responses on profile 0x0000 (interview
+        # times out otherwise; zstack didn't care). ZCL is accepted on any
+        # profile, but send it on Home Automation 0x0104 per spec anyway.
+        profile = 0x0000 if dest_ep == 0 else 0x0104
+        xbee.transmit(xbee.ADDR_COORDINATOR, msg, source_ep=source_ep, dest_ep=dest_ep, cluster=cluster, profile=profile)
         if _tx_fail_streak:
             eventlog.log('tx ok after {} fails'.format(_tx_fail_streak))
             _tx_fail_streak = 0
@@ -89,9 +94,9 @@ genBasic = {
     b'\x00\x03': { 'type': b'\x20', 'value': b'\x01' }, # hwVersion
     b'\x00\x04': { 'type': b'\x42', 'value': b'SK' }, # manufacturerName # emulate https://www.zigbee2mqtt.io/devices/TPZRCO2HT-Z3.html
     b'\x00\x05': { 'type': b'\x42', 'value': b'SKAQ1' }, # modelId
-    b'\x00\x06': { 'type': b'\x42', 'value': b'20250302' }, # dateCode
+    b'\x00\x06': { 'type': b'\x42', 'value': b'20260819' }, # dateCode
     b'\x00\x07': { 'type': b'\x30', 'value': b'\x04' }, # powerSource 0x04 - DC, 0x03 - Battery
-    b'\x40\x00': { 'type': b'\x42', 'value': b'0.0.0.2' } # swBuildId
+    b'\x40\x00': { 'type': b'\x42', 'value': b'0.0.0.3' } # swBuildId
 }
 
 # Types 0x20 - uint8, 0x29 - int16, 0x21 - uint16, 0x39 - single (4 bytes, based on the IEEE 754 standard for binary floating-point arithmetic)

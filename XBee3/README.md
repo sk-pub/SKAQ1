@@ -47,7 +47,6 @@ Non-default AT settings:
 | --- | --- | --- |
 | `ZS` | 2 | Stack profile = Zigbee PRO (required for z2m) |
 | `EE` | 1 | Encryption enabled |
-| `EO` | 2 | Use trust center / default Zigbee 3.0 link key |
 | `NJ` | 0xFE | Allow joining for 254 s when triggered |
 | `NI` | `SKAQ1` / `SKAQ2` / ... | Friendly node identifier; one per physical device |
 | `PS` | 1 | MicroPython auto-start on boot |
@@ -63,6 +62,18 @@ Defaults that should remain:
 - `CE` = 0 → router (mains-powered, always-on)
 - `SM` = 0 → no sleep
 - `ID` = 0 → join any reachable PAN (pinned automatically after first join, see below)
+- `EO` = 0 → join with the well-known link key, without the Zigbee 3.0
+  centralized-trust-center link-key update. Digi's Zigbee 3.0 guides say to
+  set `EO` bit 1 ("Use Centralized Trust Center"), but with it set the XBee3
+  (firmware 1014) requests a trust-center link-key update after joining and
+  then fails its Verify Key step against EmberZNet 8.x trust centers
+  (`TC_REQUESTER_VERIFY_KEY_FAILURE` on the coordinator) — the device is then
+  required to leave, producing an endless join/leave loop. Old pre-R21
+  coordinators (e.g. CC2531) never offered the update, which masked this.
+  With `EO` = 0 the join completes and traffic is normal (NWK encrypted).
+  Every `EO` value with bit 1 set fails the same way (0x02, 0x06, 0x0E,
+  0x12 tested); bits 2 and 3 are trust-center-side only and don't affect
+  a joiner.
 
 Set automatically by the firmware after every successful join
 (`configure_network_selfheal` in `skaq1.py`, no XCTU steps needed):
