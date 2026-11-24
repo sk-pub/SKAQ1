@@ -110,7 +110,7 @@ const definition = {
       description: "NOx index. 1 is no NOx present",
     }),
     numeric({
-      name: "SEN55 temperature",
+      name: "SEN55_temperature",
       cluster: CUSTOM_CLUSTER,
       attribute: "t2",
       unit: "°C",
